@@ -146,8 +146,12 @@ const char SERVER_PAGE_NAME[] = "/LMNSensePod.php"; // Name of submission page. 
 // However, network initialization process prevents other tasks (like
 // sensor readings or XBee messaging) from being performed, so these
 // timeouts should not be too large.
-#define ETHERNET_DHCP_TIMEOUT 5000
-#define ETHERNET_DHCP_RESPONSE_TIMEOUT 4000
+// Shorter timeouts (sufficient on many networks)
+//#define ETHERNET_DHCP_TIMEOUT 5000
+//#define ETHERNET_DHCP_RESPONSE_TIMEOUT 4000
+// Moderate timeouts
+#define ETHERNET_DHCP_TIMEOUT 12000
+#define ETHERNET_DHCP_RESPONSE_TIMEOUT 8000
 // Longer timeouts
 //#define ETHERNET_DHCP_TIMEOUT 30000
 //#define ETHERNET_DHCP_RESPONSE_TIMEOUT 10000
@@ -1235,43 +1239,45 @@ void ethernetSetup() {
   Serial.print(F("Ethernet MAC Address: "));
   Serial.println(getMACAddressString());
 
+  // REMOVE AUTOMATIC CONNECTION FROM SETUP ROUTINE.
+  // CALL BEGIN() SEPARATELY TO CONNECT.
   // Connect to the network.
   // For whatever reason, this seems to fail 20-30% of the time,
   // at least when testing on LMN network.
-  ethernetBegin(1);
+  //ethernetBegin(1);
   
   // Sometimes a second attempt will solve DHCP issues.
-  if (!ethStatus.connected()) {
-    Serial.println(F("Re-attempting to connect to the network...."));
-    delay(1000);
-    int stat = Ethernet.maintain();
-    switch (stat) {
-      case 0:
-        // No action performed
-        // If ethernet was not successfully connected before,
-        // this should not occur?
-        break;
-      case 1:
-        Serial.println(F("Ethernet: DHCP renewal failed."));
-        break;
-      case 2:
-        Serial.println(F("Ethernet: DHCP renewal succeeded."));
-        ethStatus.restarted(true);
-        break;
-      case 3:
-        Serial.println(F("Ethernet: DHCP rebind failed."));
-        break;
-      case 4:
-        Serial.println(F("Ethernet: DHCP rebind succeeded."));
-        ethStatus.restarted(true);
-        break;
-      default:
-        Serial.print(F("Ethernet: Unknown DHCP error ("));
-        Serial.print(stat);
-        Serial.println(F(")."));
-        break;
-    }
-  }
+  //if (!ethStatus.connected()) {
+  //  Serial.println(F("Re-attempting to connect to the network...."));
+  //  delay(1000);
+  //  // This SHOULDN'T do anything if a DHCP lease has not been
+  //  // obtained, i.e. begin() failed...
+  //  int stat = Ethernet.maintain();
+  //  switch (stat) {
+  //    case 0:
+  //      // No action performed
+  //      break;
+  //    case 1:
+  //      Serial.println(F("Ethernet: DHCP renewal failed."));
+  //      break;
+  //    case 2:
+  //      Serial.println(F("Ethernet: DHCP renewal succeeded."));
+  //      ethStatus.restarted(true);
+  //      break;
+  //    case 3:
+  //      Serial.println(F("Ethernet: DHCP rebind failed."));
+  //      break;
+  //    case 4:
+  //      Serial.println(F("Ethernet: DHCP rebind succeeded."));
+  //      ethStatus.restarted(true);
+  //      break;
+  //    default:
+  //      Serial.print(F("Ethernet: Unknown DHCP error ("));
+  //      Serial.print(stat);
+  //      Serial.println(F(")."));
+  //      break;
+  //  }
+  //}
 
   if (ethStatus.connected()) {
     updateClockFromNTP();
@@ -1289,64 +1295,68 @@ bool ethernetBegin(int attempts) {
   //digitalWrite(ETHERNET_EN,HIGH);
   //delay(10);
   
-  // Try multiple times to start ethernet
-  for (int k = 1; k <= attempts; k++) {
-    // Reset ethernet chip
-    // WIZnet W5100 documentation says this needs to be pulled low for
-    // as short as 2us to reinitialize all internal registers to their
-    // default states.  However, it takes 10ms to reset to internal
-    // PLOCK (whatever that is...).
-    digitalWrite(WIZ812MJ_RESET_PIN, LOW);
-    delay(1);
-    digitalWrite(WIZ812MJ_RESET_PIN, HIGH);
-    delay(10);
-    
-    //Ethernet.init(WIZ812MJ_ES_PIN);
-    
-    // Link status (not supported by W5100)
-    //Serial.print(F("Ethernet link status: "));
-    //Serial.println(Ethernet.linkStatus());
-
-    // Static IP address
-    // There is no checking of valid network connection in this
-    // case, so we just return true.
-    // If any addresses/masks are zero, we set IP-dependent
-    // default values.
-    if ((networkConfig.flags & 0x01) != 0) {
-      IPAddress ip = IPAddress(networkConfig.staticIP);
-      IPAddress dns = IPAddress(networkConfig.dnsIP);
-      if (networkConfig.dnsIP == 0) {
-        dns = ip;
-        dns[3] = 1;
-        //dns = IPAddress(8,8,8,8);  // Google DNS
-      }
-      IPAddress gateway = IPAddress(networkConfig.gatewayIP);
-      if (networkConfig.gatewayIP == 0) {
-        gateway = ip;
-        gateway[3] = 1;
-      }
-      IPAddress subnet = IPAddress(networkConfig.subnet);
-      if (networkConfig.subnet == 0) {
-        subnet = IPAddress(255,255,255,0);
-      }
-      Ethernet.begin(ethMACAddress,ip,dns,gateway,subnet);
-      ethStatus.restarted(true);
-      Serial.print(F("Ethernet initialized with static IP address. IP: "));
-      Serial.println(Ethernet.localIP());
-      return true;
+  // Reset ethernet chip
+  // WIZnet W5100 documentation says this needs to be pulled low for
+  // as short as 2us to reinitialize all internal registers to their
+  // default states.  However, it takes 10ms to reset to internal
+  // PLOCK (whatever that is...).
+  digitalWrite(WIZ812MJ_RESET_PIN, LOW);
+  delay(1);
+  digitalWrite(WIZ812MJ_RESET_PIN, HIGH);
+  delay(10);
+  
+  //Ethernet.init(WIZ812MJ_ES_PIN);
+  
+  // Link status (not supported by W5100)
+  //Serial.print(F("Ethernet link status: "));
+  //Serial.println(Ethernet.linkStatus());
+  
+  // Static IP address
+  // There is no checking of valid network connection in this
+  // case, so we just begin ethernet and return true.
+  // If any addresses/masks are zero, we set IP-dependent
+  // default values.
+  if ((networkConfig.flags & 0x01) != 0) {
+    IPAddress ip = IPAddress(networkConfig.staticIP);
+    IPAddress dns = IPAddress(networkConfig.dnsIP);
+    if (networkConfig.dnsIP == 0) {
+      dns = ip;
+      dns[3] = 1;
+      //dns = IPAddress(8,8,8,8);  // Google DNS
     }
-
-    // Everything below is for dynamic IP address
-    
-    // For whatever reason, DHCP seems to fail 20-30% of the time,
-    // at least when testing on LMN network.  Firmware should be
-    // capable of calling this routine again if begin() fails, perhaps
-    // after some interval of time to avoid getting stuck in a
-    // reinitialization loop (if the network is actually inaccessible).
+    IPAddress gateway = IPAddress(networkConfig.gatewayIP);
+    if (networkConfig.gatewayIP == 0) {
+      gateway = ip;
+      gateway[3] = 1;
+    }
+    IPAddress subnet = IPAddress(networkConfig.subnet);
+    if (networkConfig.subnet == 0) {
+      subnet = IPAddress(255,255,255,0);
+    }
+    Ethernet.begin(ethMACAddress,ip,dns,gateway,subnet);
+    ethStatus.restarted(true);
+    Serial.print(F("Ethernet initialized with static IP address. IP: "));
+    Serial.println(Ethernet.localIP());
+    return true;
+  }
+  
+  // Everything below is for dynamic IP address
+  
+  // Try multiple times to obtain an ethernet connection via DHCP.
+  // For whatever reason, DHCP seems to fail intermittently (sometimes
+  // frequently) even on a functioning network (20-30% failure rate
+  // when testing on LMN network).  This loop allows for multiple DHCP
+  // lease attempts.  However, firmware should be capable of calling
+  // this routine again if begin() fails, perhaps after some interval
+  // of time to avoid getting stuck in a reinitialization loop (if the
+  // network is actually inaccessible).
+  for (int k = 1; k <= attempts; k++) {
     if (!Ethernet.begin(ethMACAddress,ETHERNET_DHCP_TIMEOUT,ETHERNET_DHCP_RESPONSE_TIMEOUT)) {
       ethStatus.restarted(false);
       if (k < attempts) {
         Serial.println(F("Ethernet initialization failed.  Retrying..."));
+        // Slight delay before we try again
+        delay(10);
       } else {
         Serial.println(F("Ethernet initialization failed."));
       }
@@ -1404,12 +1414,16 @@ void ethernetMaintain() {
       break;
     case 2:
       Serial.println(F("Ethernet: DHCP renewal succeeded."));
+      //ethStatus.succeeded();
+      ethStatus.restarted(true);
       break;
     case 3:
       Serial.println(F("Ethernet: DHCP rebind failed."));
       break;
     case 4:
       Serial.println(F("Ethernet: DHCP rebind succeeded."));
+      //ethStatus.succeeded();
+      ethStatus.restarted(true);
       break;
     default:
       Serial.print(F("Ethernet: Unknown DHCP maintain error ("));

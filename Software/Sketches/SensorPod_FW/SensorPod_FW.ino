@@ -116,6 +116,12 @@ void setup() {
   // Should initialize XBee first (uses XBee SN for MAC address).
   Serial.println(F("Setting up ethernet...."));
   ethernetSetup();
+  // Trying to connect to the network delays startup for unconnected
+  // (e.g. drone) units.  Connection will still be attempted for
+  // coordinator alone and only _after_ config menu.  All units can
+  // be connected manually through the menu.
+  //Serial.println(F("Connecting to the network...."));
+  //ethernetBegin(1);
   
   Serial.println();
   Serial.println(LINE);
@@ -150,13 +156,17 @@ void setup() {
   // currently connected.
   if (getModeCoord()) {
     if (!ethernetConnected()) {
-      Serial.println(F("Re-attempting to connect to the network...."));
+      Serial.println(F("Connecting to the network...."));
       ethernetBegin(3);
     }
     //ethernetMaintain();
     if (!ethernetConnected()) {
       Serial.println(F("Internet connection could not be established.  Readings will not be"));
       Serial.println(F("pushed to remote database until connection can be established."));
+    }
+    // Update time
+    if (ethernetConnected()) {
+      updateClockFromNTP();
     }
   }
   
