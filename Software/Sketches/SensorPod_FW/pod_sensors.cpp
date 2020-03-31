@@ -69,7 +69,7 @@ volatile bool adcFreeRunning = false;
 #define OPT3001_ADDR 0x45
 ClosedCube_OPT3001 opt3001;
 
-// Sound [SparkFun 12758]
+// Sound [SparkFun ADMP401]
 // Interval between sound samples in microseconds.
 // Sampling occurs through ISR, but rate should be limited to
 // only what is necessary as this will impact other ISRs.
@@ -80,6 +80,9 @@ ClosedCube_OPT3001 opt3001;
 #endif
 // Flag to indicate if sound is currently being sampled
 volatile bool soundSampling = false;
+// ADC offset of zero-volume (quiet) measurement.
+// For ADMP401, offset is half of ADC range (1024/2).
+#define MIC_OFFSET 512
 
 // Temperature/humidity [HIH8120]
 // Address already hard-coded to this in HIH library
@@ -739,16 +742,19 @@ float getLight() {
 // Sound Sensor --------------------------------------------------------
 
 // Routines below are for analog readings of a simple microphone.
-// The one used in the PODDs is the SparkFun 12758: an electret
-// microphone with a x60 amplifier.
+// The one used in the PODDs is the SparkFun ADMP401: a MEMS
+// microphone with a x67 amplifier.
 
 // Sound levels are based upon the standard deviation of many samples
 // of microphone output.  Conversion to dB(Z) (no frequency weighting)
 // is for this particular microphone and setup.
 
-// TODO: Change below statistics to keep track of (ADC - 512) values
+// Unfortunately, there are sources of electronic noise that
+// 
+
+// Ideally, below statistics keep track of (ADC - 512) values
 // where 512 is half of ADC range (zero volume, in ideal case).
-// This would reduce overflow issues, but non-offset statistical
+// This reduces overflow issues, but non-offset statistical
 // quantities can easily be calculated (notably, no impact to s.d.).
 // If x0 is an offset and uk = xk - x0, where xk is the kth ADC
 // measurement:
@@ -757,6 +763,7 @@ float getLight() {
 //     <u^2> = <x^2> - 2 x0 <x> + <x>^2
 //     <x^2> = <u^2> + 2 x0 <u> + <u>^2
 //     \sigma_u^2 = \sigma_x^2
+// This offset is subtracted in the ISR sampling function below.
 
 /* Sound data structure. */
 struct SoundData {
@@ -784,10 +791,15 @@ struct SoundData {
   float smin() const {return min0;}
   float smax() const {return max0;}
 };
+// Sound sample statistics will be accumulated in soundData.
+// However, to aid with spurious noise events, which include
+// spikes from XBEE RF, a small set of samples are first
+// collected in soundData0: if that small set looks good, it
+// is added to the full set in soundData.
 // Problems with functions in volatile struct...
 //volatile SoundData soundData;
 SoundData soundData;
-
+SoundData soundData0;
 
 /* Initializes the sound sensor (microphone) and associated data
    structures. */
@@ -797,6 +809,7 @@ void initSoundSensor() {
   stopSoundSampling();
   //resetSoundData();
   soundData.reset();
+  soundData0.reset();
   // Warn about uncalibrated results.
   Serial.println(F("Warning: Sound level values are uncalibrated (units are arbitrary)."));
 }
@@ -852,12 +865,12 @@ bool probeSoundSensor() {
   //    With  1000+ measurements, sampling fluctuations should
   //    be small compared to other issues (+/- 2/1024).
   float ave = data.ave();
-  if ((ave < 496) || (ave > 528)) return false;
+  if ((ave < (MIC_OFFSET - 16)) || (ave > (MIC_OFFSET + 16))) return false;
   //  * Fluctuations should not be extremely small
   //    (microphones tend to have a noise floor, even if
   //    space is absolutely quiet).
   float sd = data.sd();
-  if (sd < 2.0) return false;
+  if (sd < 1.0) return false;
   //  * Fluctuations should not be extremely large
   //    (unless it is very loud?).
   if (sd > 256) return false;
@@ -881,6 +894,7 @@ float getSound() {
   cli();  // Disable interrupts
   SoundData sd = soundData;
   soundData.reset();
+  soundData0.reset();
   SREG = oldSREG;
 
   // Return invalid value if no samples were taken
@@ -904,6 +918,7 @@ void startSoundSampling() {
   if (soundSampling) return;
   
   soundData.reset();
+  soundData0.reset();
   
   // Put ADC in continuously-sampling mode
   startADCFreeRunning();
@@ -950,17 +965,73 @@ bool isSoundSampling() {
 
 /* Takes a sound sample.  Intended to be run as a timer-based ISR. */
 void sampleSoundISR() {
+  // NOTE: ISRs must be kept very short to avoid interfering
+  // with other processes.  The checks performed here strain
+  // what could be considered "short".
+  // THE SOFTWARE SERIAL USED FOR THE CO2 SENSOR APPEARS TO
+  // BE AFFECTED: communication with the CO2 sensor fails at
+  // a much higher rate with the two-step sound sample
+  // accumulation process implemented here.
+  
   if (!soundSampling) return;
+  
   // Take most recent measurement from continuously-sampling ADC.
   // Will return -1 if no new measurement available or if ADC not
   // in continuously-sampling mode.
   int v = readAnalogFast();
   if (v < 0) return;
+
+  // Work with measurement relative to expected average.
+  // Offset here should be ADC reading of quiet microphone.
+  //const int OFFSET = 512;
+  v -= MIC_OFFSET;  // Centralize values
+  int vabs = (v >= 0) ? v : -v;
+  
   // Exclude extreme spikes
-  //if ((v < 32) || (v >= 992)) return;
-  //if ((v < 64) || (v >= 960)) return;
+  //if (vabs >= (512 - 32)) return;
+  //if (vabs >= (512 - 64)) return;
+  // XBee RF adds ~ +/- 200 noise to the analog signal:
+  // exclude anything larger than ~ 100 to limit impact.
+  // Note this leads to non-linear response to loud sounds,
+  // as their signals are also partly thrown out!
+  //if (vabs >= 96) return;
   // Add sample to statistics
-  soundData.add(v);
+  //soundData.add(v);
+
+  // Ignore large values.
+  // These are not expected to occur except for very loud
+  // sounds and, even then, parts of the trace will still
+  // fall under the threshold.  The response does become
+  // non-linear at these levels, though.
+  if (vabs >= 256) return;
+  
+  // NOISE FIX:
+  // Will collect a limited number of measurements at a time
+  // into soundData0: if that set looks bad, throw it out,
+  // otherwise, add it to the total statistics in soundData.
+  soundData0.add(v);  // limited set
+
+  // Number of samples to collect in small set before
+  // adding to full set.
+  const int N0 = 10;
+  if (soundData0.N < N0) return;
+  
+  // Determine if recent data is good.
+  // If so, add to statistics.  Otherwise, throw out.
+  // Because this is ISR, all checks are simple integer
+  // arithmetic.  The number of operations here are
+  // still potentially pushing what should be done in
+  // an ISR...
+  int sum  = soundData0.max0 + soundData0.min0;
+  int diff = soundData0.max0 - soundData0.min0;
+  if ((sum > -16) && (sum < 16) && (diff < 256)) {
+    soundData.N += soundData0.N;
+    soundData.sum += soundData0.sum;
+    soundData.sum2 += soundData0.sum2;
+    if (soundData0.min0 < soundData.min0) soundData.min0 = soundData0.min0;
+    if (soundData0.max0 > soundData.max0) soundData.max0 = soundData0.max0;
+  }
+  soundData0.reset();
 }
 
 
@@ -972,6 +1043,7 @@ void resetSoundData() {
   uint8_t oldSREG = SREG;  // Save interrupt status (among other things)
   cli();  // Disable interrupts
   soundData.reset();
+  soundData0.reset();
   SREG = oldSREG;
 }
 
@@ -1042,6 +1114,7 @@ void testSoundSensor(unsigned long cycles, unsigned long sampleInterval) {
     cli();  // Disable interrupts
     SoundData sd = soundData;
     soundData.reset();
+    soundData0.reset();
     SREG = oldSREG;
 
     unsigned long t = millis() - t0;
@@ -1319,6 +1392,13 @@ float getGlobeTemperature() {
 
 // Good reference for Arduino serial interface with CozIR CO2 sensor:
 //   https://github.com/roder/cozir
+
+// NOTE: THE SOUND SAMPLING ISR APPEARS TO SOMETIMES INTERFERE WITH THE
+// SOFTWARE SERIAL INTERFACE USED TO COMMUNICATE WITH THE CO2 SENSOR.
+// The result is that some communications fail or garbled results
+// are received (one bit or one byte missing/bad?).  The effect is
+// more pronounced when the sound sampling rate is increased for
+// testing.
 
 
 /* Initializes the CO2 sensor. */
