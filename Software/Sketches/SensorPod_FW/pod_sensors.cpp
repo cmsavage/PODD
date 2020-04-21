@@ -28,6 +28,9 @@
 // General sensor-related variables
 bool sensorsInitialized = false;
 
+// Flag for ISRs to return quickly
+volatile bool _limitSensorBackgroundTasks = false;
+
 // Microphone pin (analog input)
 #define MIC_PIN A0
 
@@ -525,6 +528,23 @@ void testSensors(unsigned long cycles, unsigned long sampleInterval) {
 
 
 
+// Resource Management -------------------------------------------------
+
+/* Use to (temporarily) indicate to background tasks (ISRs) to 
+   limit their resource usage.  One usage of this routine is to
+   have the sound sampling ISR suspend statistics accumulation
+   while a software serial interface is being used. */
+void limitSensorBackgroundTasks(bool limit) {
+  // Disable interrupts to prevent ISRs from changing values.
+  // Store previous interrupt state so we can restore it afterwards.
+  uint8_t oldSREG = SREG;  // Save interrupt status (among other things)
+  cli();  // Disable interrupts
+  _limitSensorBackgroundTasks = limit;
+  SREG = oldSREG;
+}
+
+
+
 // ADC / Analog Measurements -------------------------------------------
 
 /* To allow for rapid ADC measurements of the microphone without
@@ -971,9 +991,15 @@ void sampleSoundISR() {
   // THE SOFTWARE SERIAL USED FOR THE CO2 SENSOR APPEARS TO
   // BE AFFECTED: communication with the CO2 sensor fails at
   // a much higher rate with the two-step sound sample
-  // accumulation process implemented here.
+  // accumulation process implemented here.  A flag is used
+  // to stop sample accumulation during use of the software
+  // serial.
   
   if (!soundSampling) return;
+
+  // This flag is set during software serial interactions and
+  // other times when this routine might otherwise interfere.
+  if (_limitSensorBackgroundTasks) return;
   
   // Take most recent measurement from continuously-sampling ADC.
   // Will return -1 if no new measurement available or if ADC not
@@ -1003,7 +1029,9 @@ void sampleSoundISR() {
   // sounds and, even then, parts of the trace will still
   // fall under the threshold.  The response does become
   // non-linear at these levels, though.
-  if (vabs >= 256) return;
+  // Note: Commenting this means multiple samples around
+  // this spike will also be thrown away (below).
+  //if (vabs >= 256) return;
   
   // NOISE FIX:
   // Will collect a limited number of measurements at a time
@@ -1585,6 +1613,10 @@ String cozirCommandString(char c, int v, int v2) {
    The serial buffer will be left with whatever the sensor sends
    after the command character. */
 bool cozirSendCommand(char c, int v, int v2) {
+  // Make sure ISRs will not interfere with the
+  // sensitive software serial interface.
+  // Must release this before returning!
+  limitSensorBackgroundTasks(true);
   //cozirSendCommand(cozirCommandString(c,v));
   // Clear incoming serial buffer first
   while(CO2_serial.available()) CO2_serial.read();
@@ -1616,6 +1648,7 @@ bool cozirSendCommand(char c, int v, int v2) {
         n = CO2_serial.available();
         delay(2);
       }
+      limitSensorBackgroundTasks(false);
       return (c0 == c);
       // Note post-command-character data received from sensor
       // remains in the serial buffer.
@@ -1623,6 +1656,7 @@ bool cozirSendCommand(char c, int v, int v2) {
     delay(1);
   }
   // Timed out
+  limitSensorBackgroundTasks(false);
   return false;
 }
 
